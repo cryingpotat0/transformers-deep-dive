@@ -1,4 +1,5 @@
 import torch as t
+import numpy as np
 import torch.nn as nn
 import torch.optim as optim
 import requests as r
@@ -7,6 +8,8 @@ import requests as r
 train_test_split = 0.8
 batch_size = 32
 context_size = 8
+embedding_size = 32
+head_size = 16
 iters = 50000
 reporting_iters = 5000
 
@@ -44,11 +47,30 @@ language_size = len(unique_chars)
 class BigramLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
-        self.embedding = nn.Embedding(language_size, language_size)
+        self.token_embedding = nn.Embedding(language_size, embedding_size)
+        self.position_embedding = nn.Embedding(context_size, embedding_size)
+        self.lm_head =  nn.Linear(head_size, language_size)
+        self.keys = nn.Linear(embedding_size, head_size)
+        self.queries = nn.Linear(embedding_size, head_size)
+        self.values =  nn.Linear(embedding_size, head_size)
+
 
     def forward(self, x, target=None):
         # x (B, T), target (B, T)
-        logits = self.embedding(x) # (B, T, C)
+        B, T = x.shape
+        token_embeddings = self.token_embedding(x) # (B, T, C)
+        position_embeddings = self.position_embedding(t.arange(T)) # T, C
+        embeddings = token_embeddings + position_embeddings # (B, T, C)
+        keys = self.keys(embeddings) # (B, T, H)
+        queries = self.queries(embeddings) # (B, T, H)
+        # print(keys.size(), queries.size())
+        wei = queries @ keys.transpose(-2, -1) / np.sqrt(head_size) # (T, T)
+        trill = t.tril(t.ones(T, T))
+        wei = wei.masked_fill(trill == 0, -t.inf)
+        wei = nn.functional.softmax(wei, dim=1) # (B, T, T)
+        pre_logits = wei @ self.values(embeddings) # (B, T, T)
+        # print(pre_logits.shape)
+        logits = self.lm_head(pre_logits)
         if target is not None:
             B, T, C = logits.shape
             logits = logits.view(B*T, C)
@@ -60,10 +82,10 @@ class BigramLanguageModel(nn.Module):
 
     def generate(self, idxs, max_num_tokens):
         for _ in range(max_num_tokens):
-            logits, _ = self(idxs)
+            logits, _ = self(idxs[:, -context_size:])
             probs = nn.functional.softmax(logits[:, -1, :], dim=-1)
             idx_next = t.multinomial(probs, num_samples=1)
-            idxs = t.concat([idxs, idx_next], dim=-1)
+            idxs = t.cat((idxs, idx_next), dim=-1)
         return idxs
 
 def compute_loss(model, loss):
@@ -90,6 +112,6 @@ for i in range(iters):
 
 # Try on a random output
 generate_tokens = 1000
-print(decode(model.generate(t.zeros((1, 1), dtype=t.long), generate_tokens)[0].tolist()))
+print(decode(model.generate(t.zeros((1, context_size - 1), dtype=t.long), generate_tokens)[0].tolist()))
 
 
